@@ -200,8 +200,8 @@ def matrix_to_pos_rotation_matrix(matrix):
         pos: (3,) shape 
         rot: (3,3) matrix
     """
-    pos = matrix[:3, 3]
-    rot = matrix[:3, :3]
+    pos = matrix[..., :3, 3]
+    rot = matrix[..., :3, :3]
     return pos, rot
 
 def batch_pos_rot_matrix_to_matrix(pos, rot):
@@ -663,6 +663,15 @@ def to_homo_torch(pts):
   homo = torch.cat((pts, ones),dim=-1)
   return homo
 
+# NOTE(ycho): does not work when scale factor is also involved...
+def invert_transform(T):
+  out = torch.zeros_like(T)
+  Si = 1/torch.linalg.det(T[..., :-1, :-1])[..., None, None]
+  out[..., :-1, :-1] = Si * T[..., :-1, :-1].swapaxes(-1, -2) # R.T
+  out[..., :-1, -1:] = - out[..., :-1, :-1] @ out[..., :-1, -1:] #-R.T@t
+  out[..., -1, -1] = T[..., -1, -1]
+  return out
+
 
 def transform_pts(pts,tf):
   """Transform 2d or 3d points
@@ -711,52 +720,94 @@ def compute_mesh_diameter(model_pts=None, mesh=None, n_sample=1000):
   diameter = dists.max()
   return diameter
 
+def compute_tf_batch(left, right, top, bottom, out_size, device = None):
+  B = len(left)
+  left = left.round()
+  right = right.round()
+  top = top.round()
+  bottom = bottom.round()
 
-def compute_crop_window_tf_batch(pts=None, H=None, W=None, poses=None, K=None, crop_ratio=1.2, out_size=None, rgb=None, uvs=None, method='min_box', mesh_diameter=None):
+  out = torch.zeros((B,3,3),
+                    dtype=torch.float32, device = device)
+  out[..., 0, 0] = out_size[0]/(right-left)
+  out[..., 1, 1] = out_size[1]/(bottom-top)
+  out[..., 0, 2] = (-left) * out[...,0,0]
+  out[..., 1, 2] = (-top) * out[..., 1, 1]
+  out[..., 2, 2] = 1
+  return out
+
+
+  # tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
+  # tf[:,0,2] = -left
+  # tf[:,1,2] = -top
+  # new_tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
+  # new_tf[:,0,0] = out_size[0]/(right-left)
+  # new_tf[:,1,1] = out_size[1]/(bottom-top)
+  # LHS
+  # w/(r-l) 0 0
+  # 0 h/(b-t) 0
+  # 0 0 1
+  
+  # RHS
+  # 1 0 -l
+  # 0 1 -t
+  # 0 0 1
+  tf = new_tf@tf
+  return tf
+
+def compute_crop_window_tf_batch(pts=None, H=None, W=None,
+                                 poses=None, K=None,
+                                 crop_ratio=1.2, out_size=None,
+                                 rgb=None, uvs=None,
+                                 method='min_box', mesh_diameter=None):
   '''Project the points and find the cropping transform
   @pts: (N,3)
   @poses: (B,4,4) tensor
   @min_box: min_box/min_circle
   @scale: scale to apply to the tightly enclosing roi
   '''
-  def compute_tf_batch(left, right, top, bottom):
-    B = len(left)
-    left = left.round()
-    right = right.round()
-    top = top.round()
-    bottom = bottom.round()
-
-    tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
-    tf[:,0,2] = -left
-    tf[:,1,2] = -top
-    new_tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
-    new_tf[:,0,0] = out_size[0]/(right-left)
-    new_tf[:,1,1] = out_size[1]/(bottom-top)
-    tf = new_tf@tf
-    return tf
-
   B = len(poses)
-  torch.set_default_tensor_type('torch.cuda.FloatTensor')
+  # torch.set_default_tensor_type('torch.cuda.FloatTensor')
   if method=='box_3d':
     radius = mesh_diameter*crop_ratio/2
-    offsets = torch.tensor([0,0,0,
-                        radius,0,0,
-                        -radius,0,0,
-                        0,radius,0,
-                        0,-radius,0]).reshape(-1,3)
-    pts = poses[:,:3,3].reshape(-1,1,3)+offsets.reshape(1,-1,3)
-    pts = pts.to(dtype=torch.float32)
-    K = torch.as_tensor(K, dtype=torch.float32)
-    projected = (K@pts.reshape(-1,3).T).T
-    uvs = projected[:,:2]/projected[:,2:3]
-    uvs = uvs.reshape(B, -1, 2)
-    center = uvs[:,0]  #(B,2)
-    radius = torch.abs(uvs-center.reshape(-1,1,2)).reshape(B,-1).max(axis=-1)[0].reshape(-1)  #(B)
+    rad_in = radius
+
+    if True:
+      point = poses[:,:3,3].reshape(-1,1,3)
+      projected = (K@point.reshape(-1,3).T).T
+      uvs = projected[:,:2]/projected[:,2:3]
+      uvs = uvs.reshape(B, -1, 2)
+      center = uvs[:,0]
+      z = point[..., 2]
+      radius = radius / z * torch.maximum(K[...,0,0], K[...,1,1])
+      # print( center.shape, radius.shape)
+      radius = radius.reshape( -1 )
+
+    else:
+      offsets = torch.tensor([0,0,0,
+                          radius,0,0,
+                          -radius,0,0,
+                          0,radius,0,
+                          0,-radius,0]).reshape(-1,3)
+      pts = poses[:,:3,3].reshape(-1,1,3)+offsets.reshape(1,-1,3)
+      pts = pts.to(dtype=torch.float32)
+      K = torch.as_tensor(K, dtype=torch.float32)
+      projected = (K@pts.reshape(-1,3).T).T
+      uvs = projected[:,:2]/projected[:,2:3]
+      uvs = uvs.reshape(B, -1, 2)
+      center = uvs[:,0]  #(B,2)
+      radius = torch.abs(uvs-center.reshape(-1,1,2)).reshape(B,-1).max(axis=-1)[0].reshape(-1)  #(B)
+      print(rad_in,
+            mesh_diameter*crop_ratio/2,
+            poses[:,:3,3],
+            K,
+            radius)
     left = center[:,0]-radius
     right = center[:,0]+radius
     top = center[:,1]-radius
     bottom = center[:,1]+radius
-    tfs = compute_tf_batch(left, right, top, bottom)
+    tfs = compute_tf_batch(left, right, top, bottom, out_size,
+                           device=K.device)
     return tfs
 
   else:

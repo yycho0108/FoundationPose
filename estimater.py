@@ -64,6 +64,11 @@ class FoundationPose:
     min_xyz = model_pts.min(axis=-2)
     self.model_center = (min_xyz+max_xyz)/2
 
+    tf_to_center = torch.eye(4, dtype=torch.float, device='cuda')
+    tf_to_center[:3,3] = -torch.as_tensor(self.model_center, device='cuda', dtype=torch.float)
+    # return tf_to_center
+    self.tf_to_centered_mesh = tf_to_center
+
     if mesh is not None:
       self.mesh_ori = mesh.copy()
       mesh = mesh.copy()
@@ -115,9 +120,10 @@ class FoundationPose:
 
 
   def get_tf_to_centered_mesh(self):
-    tf_to_center = torch.eye(4, dtype=torch.float, device='cuda')
-    tf_to_center[:3,3] = -torch.as_tensor(self.model_center, device='cuda', dtype=torch.float)
-    return tf_to_center
+    return self.tf_to_centered_mesh
+    # tf_to_center = torch.eye(4, dtype=torch.float, device='cuda')
+    # tf_to_center[:3,3] = -torch.as_tensor(self.model_center, device='cuda', dtype=torch.float)
+    # return tf_to_center
 
 
   def to_device(self, s='cuda:0'):
@@ -358,6 +364,10 @@ class FoundationPose:
     self.poses = poses
     self.scores = scores
 
+    dpose = self.get_tf_to_centered_mesh()
+    if extra is not None:
+        extra['pose'] = poses[0]
+        extra['pose_center'] = dpose
     return best_pose.detach().reshape(4,4)
 
 def sample_added_noise(pose, 
@@ -368,6 +378,8 @@ def sample_added_noise(pose,
     #convert
     org_pose = torch.tensor(pose)
     org_pos, org_ori = matrix_to_pos_rotation_matrix(org_pose)
+    org_pos = org_pos.squeeze()
+    org_ori = org_ori.squeeze()
     org_ori = matrix_to_quaternion(org_ori.unsqueeze(0)).squeeze()
     pos = copy.deepcopy(org_pos).repeat(sample_n, 1)
     ori = copy.deepcopy(org_ori).repeat(sample_n, 1)
@@ -384,5 +396,7 @@ def sample_added_noise(pose,
     # =========================================================
     ori = quaternion_to_matrix(ori)
     pose = batch_pos_rot_matrix_to_matrix(pos, ori)
+    
+    org_pose = org_pose.squeeze()
     pose = torch.cat((pose, org_pose.unsqueeze(0)), dim=0)
-  return torch.tensor(pose).reshape(-1, 4,4)
+  return torch.tensor(pose).reshape(-1, 4, 4)

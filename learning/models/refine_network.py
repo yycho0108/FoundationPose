@@ -8,6 +8,7 @@
 
 
 import os,sys
+import einops.layers
 import numpy as np
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
@@ -16,6 +17,8 @@ from Utils import *
 import torch.nn.functional as F
 import torch
 import torch.nn as nn
+import einops
+import einops.layers.torch
 import cv2
 from functools import partial
 from network_modules import *
@@ -27,7 +30,7 @@ class RefineNet(nn.Module):
   def __init__(self, cfg=None, c_in=4, n_view=1):
     super().__init__()
     self.cfg = cfg
-    if self.cfg.use_BN:
+    if self.cfg['use_BN']:
       norm_layer = nn.BatchNorm2d
       norm_layer1d = nn.BatchNorm1d
     else:
@@ -68,26 +71,44 @@ class RefineNet(nn.Module):
       nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=512, batch_first=True),
 		  nn.Linear(512, rot_out_dim),
     )
+    self.rearrange1 = einops.layers.torch.Rearrange('b two c h w -> (b two) c h w', two = 2)
+    self.rearrange2 = einops.layers.torch.Rearrange('(b two) c h w -> b (two c) h w', two = 2)
 
 
-  def forward(self, A, B):
+  def forward(self, A, B, amp:bool = False):
     """
     @A: (B,C,H,W)
     """
-    bs = len(A)
-    output = {}
+    with torch.cuda.amp.autocast(enabled=amp):
+      bs = len(A)
+      
+      # x = torch.cat([A, B], dim=0)
+      x = torch.stack([A, B], dim = 1)
+      x = self.rearrange1(x)
+      x = self.encodeA(x)
+      ab = self.rearrange2(x)
+      # a = x[:bs]
+      # b = x[bs:]
+      # ab = torch.cat((a, b), 1).contiguous()
+      # ab = einops.rearrange(x, '(two b) c ... -> b (two c) ...', two = 2)
+      # ab = x.reshape( (2,bs) + (x.shape[1:])).swapaxes(0,1).reshape(
+      ab = self.encodeAB(ab)  #(B,C,H,W)
 
-    x = torch.cat([A,B], dim=0)
-    x = self.encodeA(x)
-    a = x[:bs]
-    b = x[bs:]
+      ab = self.pos_embed(ab.reshape(bs, ab.shape[1], -1).permute(0,2,1))
+      trans = self.trans_head(ab).mean(dim=1)
+      rot = self.rot_head(ab).mean(dim=1)
+    return {'trans':trans, 'rot':rot}
 
-    ab = torch.cat((a,b),1).contiguous()
-    ab = self.encodeAB(ab)  #(B,C,H,W)
+def main():
+  # torch._dynamo.config.verbose=True
+  net = RefineNet({'use_BN': True,
+                   'rot_rep': 'axis_angle'}, 6).cuda()
+  net = torch.compile(net)#, fullgraph=True)
+  A = torch.zeros((1,6,100,100), device='cuda',
+   dtype=torch.float32)
+  B = torch.zeros((1,6,100,100), device='cuda',
+   dtype=torch.float32)
+  net(A,B,True)
 
-    ab = self.pos_embed(ab.reshape(bs, ab.shape[1], -1).permute(0,2,1))
-
-    output['trans'] = self.trans_head(ab).mean(dim=1)
-    output['rot'] = self.rot_head(ab).mean(dim=1)
-
-    return output
+if __name__ == '__main__':
+  main()

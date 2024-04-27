@@ -57,6 +57,13 @@ def crop_img(img:th.Tensor,
     )  #(B,3,H,W)
     return crop
 
+from lie_utils import SO3
+
+_so3_exp_map = so3_exp_map 
+def so3_exp_map(x):
+  # delta=(_so3_exp_map(x) - SO3.Exp(x))
+  # print(delta.min(), delta.max())
+  return SO3.Exp(x)
 
 
 @torch.inference_mode()
@@ -64,7 +71,9 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
                          rgb, depth, K, crop_ratio,
                          xyz_map, normal_map=None, mesh_diameter=None,
                          cfg=None, glctx=None, mesh_tensors=None,
-                         dataset:PoseRefinePairH5Dataset=None):
+                         dataset:PoseRefinePairH5Dataset=None,
+                         bbox2d_crop = None
+                         ):
   logging.info("Welcome make_crop_data_batch")
   H,W = depth.shape[:2]
   args = []
@@ -86,7 +95,9 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
   normal_rs = []
   xyz_map_rs = []
 
-  bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
+  # bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
+  # print(invert_transform(tf_to_crops),
+  #       tf_to_crops.inverse())
   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
 
   for b in range(0,len(poseA),bs):
@@ -204,11 +215,19 @@ class PoseRefinePredictor:
     self.model.load_state_dict(ckpt)
 
     self.model.cuda().eval()
+    self.model = torch.compile(self.model)
     logging.info("init done")
     self.last_trans_update = None
     self.last_rot_update = None
 
-  @torch.inference_mode()
+    cfg=self.cfg
+    self.bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1,
+                                                 cfg['input_resize'][1]-1]).reshape(2,2),
+                                       device='cuda',
+                                       dtype=torch.float)
+
+  # @torch.inference_mode()
+  @torch.no_grad()
   def predict(self, rgb, depth, K, ob_in_cams,
               xyz_map, normal_map=None,
               get_vis=False, mesh=None, mesh_tensors=None,
@@ -219,7 +238,7 @@ class PoseRefinePredictor:
     '''
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     logging.info(f'ob_in_cams:{ob_in_cams.shape}')
-    tf_to_center = np.eye(4)
+    # tf_to_center = np.eye(4)
     ob_centered_in_cams = ob_in_cams
     mesh_centered = mesh
 
@@ -251,7 +270,8 @@ class PoseRefinePredictor:
                                        K, crop_ratio=crop_ratio, normal_map=normal_map,
                                        xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx,
                                        mesh_tensors=mesh_tensors, dataset=self.dataset,
-                                       mesh_diameter=mesh_diameter)
+                                       mesh_diameter=mesh_diameter,
+                                       bbox2d_crop = self.bbox2d_crop)
       B_in_cams = []
       for b in range(0, pose_data.rgbAs.shape[0], bs):
         A = torch.cat([pose_data.rgbAs[b:b+bs].cuda(),
@@ -297,8 +317,8 @@ class PoseRefinePredictor:
         #       )
         # raise ValueError('stop')
         logging.info("forward start")
-        with torch.cuda.amp.autocast(enabled=self.amp):
-          output = self.model(A, B)
+        # with torch.cuda.amp.autocast(enabled=self.amp):
+        output = self.model(A, B, amp = self.amp)
         for k in output:
           output[k] = output[k].float()
         logging.info("forward done")
@@ -347,8 +367,8 @@ class PoseRefinePredictor:
 
       B_in_cams = torch.cat(B_in_cams, dim=0).reshape(len(ob_in_cams),4,4)
 
-    B_in_cams_out = B_in_cams@torch.tensor(tf_to_center[None], device='cuda', dtype=torch.float)
-    torch.cuda.empty_cache()
+    B_in_cams_out = B_in_cams#@torch.tensor(tf_to_center[None], device='cuda', dtype=torch.float)
+    # torch.cuda.empty_cache()
     self.last_trans_update = trans_delta
     self.last_rot_update = rot_mat_delta
 
@@ -363,7 +383,8 @@ class PoseRefinePredictor:
                                        normal_map=normal_map, xyz_map=xyz_map_tensor,
                                        cfg=self.cfg, glctx=glctx,
                                        mesh_tensors=mesh_tensors, dataset=self.dataset,
-                                       mesh_diameter=mesh_diameter)
+                                       mesh_diameter=mesh_diameter,
+                                       bbox2d_crop=self.bbox2d_crop)
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()
         rgbB_vis = (pose_data.rgbBs[id]*255).permute(1,2,0).data.cpu().numpy()
