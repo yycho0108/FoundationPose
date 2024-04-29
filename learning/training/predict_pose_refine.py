@@ -408,7 +408,9 @@ class PoseRefinePredictor:
       canvas = make_grid_image(canvas, nrow=1, padding=padding, pad_value=255)
 
       pose_data = make_crop_data_batch(self.cfg.input_resize,
-                                       B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter)
+                                       B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg,
+                                       glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter,
+                                       bbox2d_crop=self.bbox2d_crop)
       canvas_refined = []
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()

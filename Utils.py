@@ -770,6 +770,8 @@ def compute_crop_window_tf_batch(pts=None, H=None, W=None,
     radius = mesh_diameter*crop_ratio/2
     rad_in = radius
     if True:
+      K = torch.as_tensor(K, device='cuda', dtype=torch.float32)
+      poses = torch.as_tensor(poses, device='cuda', dtype=torch.float32)
       point = poses[:,:3,3].reshape(-1,1,3)
       projected = (K@point.reshape(-1,3).T).T
       uvs = projected[:,:2]/projected[:,2:3]
