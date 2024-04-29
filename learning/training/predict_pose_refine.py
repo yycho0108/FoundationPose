@@ -165,7 +165,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
 
 
 class PoseRefinePredictor:
-  def __init__(self,):
+  def __init__(self,empty_cache=False):
     logging.info("welcome")
     self.amp = True
     self.run_name = "2023-10-28-18-33-37"
@@ -177,6 +177,7 @@ class PoseRefinePredictor:
 
     self.cfg['ckpt_dir'] = ckpt_dir
     self.cfg['enable_amp'] = True
+    self.empty_cache = empty_cache
 
     ########## Defaults, to be backward compatible
     if 'use_normal' not in self.cfg:
@@ -367,7 +368,8 @@ class PoseRefinePredictor:
       B_in_cams = torch.cat(B_in_cams, dim=0).reshape(len(ob_in_cams),4,4)
 
     B_in_cams_out = B_in_cams#@torch.tensor(tf_to_center[None], device='cuda', dtype=torch.float)
-    # torch.cuda.empty_cache()
+    if self.empty_cache:
+      torch.cuda.empty_cache()
     self.last_trans_update = trans_delta
     self.last_rot_update = rot_mat_delta
 
@@ -433,7 +435,8 @@ class PoseRefinePredictor:
 
       canvas_refined = make_grid_image(canvas_refined, nrow=1, padding=padding, pad_value=255)
       canvas = make_grid_image([canvas, canvas_refined], nrow=2, padding=padding, pad_value=255)
-      torch.cuda.empty_cache()
+      if self.empty_cache:
+        torch.cuda.empty_cache()
       return B_in_cams_out, canvas
 
     return B_in_cams_out, None
