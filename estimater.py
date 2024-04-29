@@ -333,7 +333,7 @@ class FoundationPose:
 
 
 
-  def track_one_among_noises(self, rgb, mask, depth, K, iteration, pose_last, sample_guess_translation, sample_num, current_pos_noise=0.04, current_rot_noise=0.3, extra={}):
+  def track_one_among_noises(self, rgb, mask, depth, K, iteration, pose_last, sample_guess_translation, sample_num, current_pos_noise=0.01, current_rot_noise=0.3, extra={}):
     sampled_poses = self.sample_added_noise(pose_last, 
                                             mask=mask,
                                             depth=depth,
@@ -383,7 +383,7 @@ class FoundationPose:
                          mask,
                          K,
                          sample_guess_translation,
-                         current_pos_noise=0.02, 
+                         current_pos_noise=0.01, 
                          current_rot_noise=0.15,
                          sample_n = 20):
     if sample_n != 1:
@@ -400,9 +400,9 @@ class FoundationPose:
       # # ====================== Add noise ========================
       if sample_guess_translation: # guess translation
         pos = torch.tensor(self.guess_translation(depth=depth, mask=mask, K=K)).repeat(sample_n, 1)
-      else: # add noise on last timestep pose
-        position_noise = pos_noise * current_pos_noise
-        pos += position_noise          
+      # add noise on timestep pose
+      position_noise = pos_noise * current_pos_noise
+      pos += position_noise          
 
       # # add orientation loss
       rotation_noise = rot_noise * current_rot_noise
