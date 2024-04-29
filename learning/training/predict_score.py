@@ -115,7 +115,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh, rgb, depth, K, crop_rati
 
 
 class ScorePredictor:
-  def __init__(self, amp=True):
+  def __init__(self, empty_cache=False, amp=True):
     self.amp = amp
     self.run_name = "2024-01-11-20-02-45"
 
@@ -127,6 +127,7 @@ class ScorePredictor:
 
     self.cfg['ckpt_dir'] = ckpt_dir
     self.cfg['enable_amp'] = True
+    self.empty_cache = empty_cache
 
     ########## Defaults, to be backward compatible
     if 'use_normal' not in self.cfg:
@@ -235,7 +236,8 @@ class ScorePredictor:
       scores = scores_global
 
     logging.info(f'forward done')
-    torch.cuda.empty_cache()
+    if self.empty_cache:
+      torch.cuda.empty_cache()
 
     if get_vis:
       logging.info("get_vis...")
