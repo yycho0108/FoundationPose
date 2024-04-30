@@ -96,8 +96,141 @@ def set_logging_format(level=logging.INFO):
   FORMAT = '[%(funcName)s()] %(message)s'
   logging.basicConfig(level=level, format=FORMAT)
 
-set_logging_format()
+# set_logging_format()
 
+import torch
+def quaternion_to_matrix(quaternions):
+    """
+    FROM https://github.com/anthonysimeonov/rpdiff/blob/master/src/rpdiff/utils/torch3d_util.py
+    Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: quaternions with real part first,
+            as tensor of shape (..., 4).
+
+    Returns:
+        Rotation matrices as tensor of shape (..., 3, 3).
+    """
+    r, i, j, k = torch.unbind(quaternions, -1)
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
+
+def _sqrt_positive_part(x: torch.Tensor) -> torch.Tensor:
+    """
+    Returns torch.sqrt(torch.max(0, x))
+    but with a zero subgradient where x is 0.
+    """
+    ret = torch.zeros_like(x)
+    positive_mask = x > 0
+    ret[positive_mask] = torch.sqrt(x[positive_mask])
+    return ret
+
+def matrix_to_quaternion(matrix: torch.Tensor) -> torch.Tensor:
+    """
+    Convert rotations given as rotation matrices to quaternions.
+
+    Args:
+        matrix: Rotation matrices as tensor of shape (..., 3, 3).
+
+    Returns:
+        quaternions with real part first, as tensor of shape (..., 4).
+    """
+    if matrix.size(-1) != 3 or matrix.size(-2) != 3:
+        raise ValueError(f"Invalid rotation matrix  shape f{matrix.shape}.")
+
+    batch_dim = matrix.shape[:-2]
+    m00, m01, m02, m10, m11, m12, m20, m21, m22 = torch.unbind(
+        matrix.reshape(*batch_dim, 9), dim=-1
+    )
+
+    q_abs = _sqrt_positive_part(
+        torch.stack(
+            [
+                1.0 + m00 + m11 + m22,
+                1.0 + m00 - m11 - m22,
+                1.0 - m00 + m11 - m22,
+                1.0 - m00 - m11 + m22,
+            ],
+            dim=-1,
+        )
+    )
+
+    # we produce the desired quaternion multiplied by each of r, i, j, k
+    quat_by_rijk = torch.stack(
+        [
+            torch.stack([q_abs[..., 0] ** 2, m21 - m12, m02 - m20, m10 - m01], dim=-1),
+            torch.stack([m21 - m12, q_abs[..., 1] ** 2, m10 + m01, m02 + m20], dim=-1),
+            torch.stack([m02 - m20, m10 + m01, q_abs[..., 2] ** 2, m12 + m21], dim=-1),
+            torch.stack([m10 - m01, m20 + m02, m21 + m12, q_abs[..., 3] ** 2], dim=-1),
+        ],
+        dim=-2,
+    )
+
+    # We floor here at 0.1 but the exact level is not important; if q_abs is small,
+    # the candidate won't be picked.
+    # pyre-ignore [16]: `torch.Tensor` has no attribute `new_tensor`.
+    quat_candidates = quat_by_rijk / (2.0 * q_abs[..., None].max(q_abs.new_tensor(0.1)))
+
+    # if not for numerical problems, quat_candidates[i] should be same (up to a sign),
+    # forall i; we pick the best-conditioned one (with the largest denominator)
+
+    return quat_candidates[
+        F.one_hot(q_abs.argmax(dim=-1), num_classes=4) > 0.5, :  # pyre-ignore[16]
+    ].reshape(*batch_dim, 4)
+
+def matrix_to_pos_rotation_matrix(matrix):
+    """
+      matrix: (4,4) shape
+      Returns:
+        pos: (3,) shape 
+        rot: (3,3) matrix
+    """
+    pos = matrix[:3, 3]
+    rot = matrix[:3, :3]
+    return pos, rot
+
+def batch_pos_rot_matrix_to_matrix(pos, rot):
+    """
+      Args:
+        pos: (3,) shape 
+        rot: (3,3) shape matrix
+      Returns:
+        matrix: (4,4)  shape matrix
+    """
+    # Check if the input matrices have the correct shapes
+    if pos.dim() != 2 or pos.size(1) != 3 or rot.dim() != 3 or rot.size(1) != 3 or rot.size(2) != 3:
+        raise ValueError("pos should be a 2D tensor with shape (batch_size, 3) and rot should be a 3D tensor with shape (batch_size, 3, 3).")
+    batch_size = pos.size(0)
+    matrix = torch.zeros((batch_size, 4, 4), dtype=torch.float32)
+    matrix[:,3,3]=1
+    matrix[:, :3, :3] = rot
+    matrix[:, :3, 3] = pos
+    
+    return matrix
+def normalize_quaternion_torch(quat):
+    """
+        Input: quat shaped (N, 4)
+    
+    """
+    # Calculating the magnitude of the quaternion tensor
+    magnitude = torch.norm(quat, dim=1)[:,  None]
+    normalized_quat = torch.div(quat, magnitude)
+    return normalized_quat
 
 
 
@@ -755,7 +888,10 @@ def draw_posed_3d_box(K, img, ob_in_cam, bbox, line_color=(0,255,0), linewidth=2
   return img
 
 
-def projection_matrix_from_intrinsics(K, height, width, znear, zfar, window_coords='y_down'):
+def projection_matrix_from_intrinsics(K,
+                                      height, width,
+                                      znear, zfar,
+                                      window_coords='y_down'):
   """Conversion of Hartley-Zisserman intrinsic matrix to OpenGL proj. matrix.
 
   Ref:
@@ -772,6 +908,15 @@ def projection_matrix_from_intrinsics(K, height, width, znear, zfar, window_coor
   :param window_coords: 'y_up' or 'y_down'.
   :return: 4x4 ndarray with the OpenGL projection matrix.
   """
+  is_th = isinstance(K, torch.Tensor)
+  if is_th:
+    proj = torch.zeros( (*K.shape[:-2], 4, 4),
+                       dtype = K.dtype,
+                       device = K.device)
+  else:
+    proj = np.zeros( (*K.shape[:-2], 4, 4),
+                    dtype = K.dtype)
+    
   x0 = 0
   y0 = 0
   w = width
@@ -779,29 +924,46 @@ def projection_matrix_from_intrinsics(K, height, width, znear, zfar, window_coor
   nc = znear
   fc = zfar
 
-  depth = float(fc - nc)
+  depth = (fc - nc)
   q = -(fc + nc) / depth
   qn = -2 * (fc * nc) / depth
 
   # Draw our images upside down, so that all the pixel-based coordinate
   # systems are the same.
   if window_coords == 'y_up':
-    proj = np.array([
-      [2 * K[0, 0] / w, -2 * K[0, 1] / w, (-2 * K[0, 2] + w + 2 * x0) / w, 0],
-      [0, -2 * K[1, 1] / h, (-2 * K[1, 2] + h + 2 * y0) / h, 0],
-      [0, 0, q, qn],  # Sets near and far planes (glPerspective).
-      [0, 0, -1, 0]
-      ])
+    proj[..., 0, 0] = 2 * K[..., 0, 0] / w 
+    proj[..., 0, 1] = -2 * K[..., 0, 1] / w 
+    proj[..., 0, 2] = (-2 * K[..., 0, 2] + w + 2 * x0)/w
+    proj[..., 1, 1] = -2 * K[..., 1, 1] / h
+    proj[..., 1, 2] = (-2 * K[..., 1, 2] + h + 2 * y0) / h
+    proj[..., 2,2]=q
+    proj[...,2,3]=qn
+    proj[...,3,2] = -1
+    
+    # proj = np.array([
+    #   [2 * K[0, 0] / w, -2 * K[0, 1] / w, (-2 * K[0, 2] + w + 2 * x0) / w, 0],
+    #   [0, -2 * K[1, 1] / h, (-2 * K[1, 2] + h + 2 * y0) / h, 0],
+    #   [0, 0, q, qn],  # Sets near and far planes (glPerspective).
+    #   [0, 0, -1, 0]
+    #   ])
 
   # Draw the images upright and modify the projection matrix so that OpenGL
   # will generate window coords that compensate for the flipped image coords.
   elif window_coords == 'y_down':
-    proj = np.array([
-      [2 * K[0, 0] / w, -2 * K[0, 1] / w, (-2 * K[0, 2] + w + 2 * x0) / w, 0],
-      [0, 2 * K[1, 1] / h, (2 * K[1, 2] - h + 2 * y0) / h, 0],
-      [0, 0, q, qn],  # Sets near and far planes (glPerspective).
-      [0, 0, -1, 0]
-      ])
+    # proj = np.array([
+    #   [2 * K[0, 0] / w, -2 * K[0, 1] / w, (-2 * K[0, 2] + w + 2 * x0) / w, 0],
+    #   [0, 2 * K[1, 1] / h, (2 * K[1, 2] - h + 2 * y0) / h, 0],
+    #   [0, 0, q, qn],  # Sets near and far planes (glPerspective).
+    #   [0, 0, -1, 0]
+    #   ])
+    proj[..., 0, 0] = 2 * K[..., 0, 0] / w 
+    proj[..., 0, 1] = -2 * K[..., 0, 1] / w 
+    proj[..., 0, 2] = (-2 * K[..., 0, 2] + w + 2 * x0)/w
+    proj[..., 1, 1] = 2 * K[..., 1, 1] / h
+    proj[..., 1, 2] = (2 * K[..., 1, 2] - h + 2 * y0) / h
+    proj[..., 2,2]=q
+    proj[...,2,3]=qn
+    proj[...,3,2] = -1
   else:
     raise NotImplementedError
 
