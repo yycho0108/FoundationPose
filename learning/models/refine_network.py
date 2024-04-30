@@ -30,7 +30,7 @@ class RefineNet(nn.Module):
   def __init__(self, cfg=None, c_in=4, n_view=1):
     super().__init__()
     self.cfg = cfg
-    if self.cfg['use_BN']:
+    if self.cfg.use_BN:
       norm_layer = nn.BatchNorm2d
       norm_layer1d = nn.BatchNorm1d
     else:
@@ -82,17 +82,11 @@ class RefineNet(nn.Module):
     with torch.cuda.amp.autocast(enabled=amp):
       bs = len(A)
       
-      # x = torch.cat([A, B], dim=0)
       x = torch.stack([A, B], dim = 1)
       x = self.rearrange1(x)
       x = self.encodeA(x)
       ab = self.rearrange2(x)
-      # a = x[:bs]
-      # b = x[bs:]
-      # ab = torch.cat((a, b), 1).contiguous()
-      # ab = einops.rearrange(x, '(two b) c ... -> b (two c) ...', two = 2)
-      # ab = x.reshape( (2,bs) + (x.shape[1:])).swapaxes(0,1).reshape(
-      ab = self.encodeAB(ab)  #(B,C,H,W)
+      ab = self.encodeAB(ab)
 
       ab = self.pos_embed(ab.reshape(bs, ab.shape[1], -1).permute(0,2,1))
       trans = self.trans_head(ab).mean(dim=1)

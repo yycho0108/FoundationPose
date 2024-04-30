@@ -734,25 +734,6 @@ def compute_tf_batch(left, right, top, bottom, out_size, device = None):
   out[..., 2, 2] = 1
   return out
 
-
-  # tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
-  # tf[:,0,2] = -left
-  # tf[:,1,2] = -top
-  # new_tf = torch.eye(3)[None].expand(B,-1,-1).contiguous()
-  # new_tf[:,0,0] = out_size[0]/(right-left)
-  # new_tf[:,1,1] = out_size[1]/(bottom-top)
-  # LHS
-  # w/(r-l) 0 0
-  # 0 h/(b-t) 0
-  # 0 0 1
-  
-  # RHS
-  # 1 0 -l
-  # 0 1 -t
-  # 0 0 1
-  tf = new_tf@tf
-  return tf
-
 def compute_crop_window_tf_batch(pts=None, H=None, W=None,
                                  poses=None, K=None,
                                  crop_ratio=1.2, out_size=None,
@@ -765,11 +746,11 @@ def compute_crop_window_tf_batch(pts=None, H=None, W=None,
   @scale: scale to apply to the tightly enclosing roi
   '''
   B = len(poses)
-  # torch.set_default_tensor_type('torch.cuda.FloatTensor')
   if method=='box_3d':
     radius = mesh_diameter*crop_ratio/2
     rad_in = radius
     if True:
+      # NOTE(ycho): somewhat cheaper?
       K = torch.as_tensor(K, device='cuda', dtype=torch.float32)
       poses = torch.as_tensor(poses, device='cuda', dtype=torch.float32)
       point = poses[:,:3,3].reshape(-1,1,3)

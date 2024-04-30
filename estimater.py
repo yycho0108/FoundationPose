@@ -119,9 +119,6 @@ class FoundationPose:
 
   def get_tf_to_centered_mesh(self):
     return self.tf_to_centered_mesh
-    # tf_to_center = torch.eye(4, dtype=torch.float, device='cuda')
-    # tf_to_center[:3,3] = -torch.as_tensor(self.model_center, device='cuda', dtype=torch.float)
-    # return tf_to_center
 
 
   def to_device(self, s='cuda:0'):
@@ -384,7 +381,7 @@ class FoundationPose:
                          current_rot_noise=0.15,
                          sample_n = 20):
     if sample_n != 1:
-      #convert
+      # augment extra pose candidates.
       org_pose = torch.tensor(pose).unsqueeze(0)
       org_pos, org_ori = matrix_to_pos_rotation_matrix(org_pose)
       org_pos = org_pos.squeeze()

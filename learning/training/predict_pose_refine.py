@@ -95,9 +95,6 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
   normal_rs = []
   xyz_map_rs = []
 
-  # bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1, cfg['input_resize'][1]-1]).reshape(2,2), device='cuda', dtype=torch.float)
-  # print(invert_transform(tf_to_crops),
-  #       tf_to_crops.inverse())
   bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
 
   for b in range(0,len(poseA),bs):
@@ -165,7 +162,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
 
 
 class PoseRefinePredictor:
-  def __init__(self,empty_cache=False):
+  def __init__(self, empty_cache:bool=False):
     logging.info("welcome")
     self.amp = True
     self.run_name = "2023-10-28-18-33-37"
@@ -221,7 +218,7 @@ class PoseRefinePredictor:
     self.last_trans_update = None
     self.last_rot_update = None
 
-    cfg=self.cfg
+    cfg = self.cfg
     self.bbox2d_crop = torch.as_tensor(np.array([0, 0, cfg['input_resize'][0]-1,
                                                  cfg['input_resize'][1]-1]).reshape(2,2),
                                        device='cuda',
@@ -239,7 +236,6 @@ class PoseRefinePredictor:
     '''
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     logging.info(f'ob_in_cams:{ob_in_cams.shape}')
-    # tf_to_center = np.eye(4)
     ob_centered_in_cams = ob_in_cams
     mesh_centered = mesh
 
@@ -367,7 +363,7 @@ class PoseRefinePredictor:
 
       B_in_cams = torch.cat(B_in_cams, dim=0).reshape(len(ob_in_cams),4,4)
 
-    B_in_cams_out = B_in_cams#@torch.tensor(tf_to_center[None], device='cuda', dtype=torch.float)
+    B_in_cams_out = B_in_cams
     if self.empty_cache:
       torch.cuda.empty_cache()
     self.last_trans_update = trans_delta
