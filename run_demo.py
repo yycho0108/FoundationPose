@@ -71,7 +71,7 @@ if __name__=='__main__':
         m.apply_transform(pose)
         m.export(f'{debug_dir}/model_tf.obj')
         xyz_map = depth2xyzmap(depth, reader.K)
-        valid = depth>=0.1
+        valid = (depth>=0.1) & (depth < 1.5)
         pcd = toOpen3dCloud(xyz_map[valid], color[valid])
         o3d.io.write_point_cloud(f'{debug_dir}/scene_complete.ply', pcd)
     else:
