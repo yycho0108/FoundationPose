@@ -213,7 +213,7 @@ class PoseRefinePredictor:
     self.model.load_state_dict(ckpt)
 
     self.model.cuda().eval()
-    self.model = torch.compile(self.model)
+    # self.model = torch.compile(self.model)
     logging.info("init done")
     self.last_trans_update = None
     self.last_rot_update = None
@@ -224,8 +224,8 @@ class PoseRefinePredictor:
                                        device='cuda',
                                        dtype=torch.float)
 
-  # @torch.inference_mode()
-  @torch.no_grad()
+  @torch.inference_mode()
+  # @torch.no_grad()
   def predict(self, rgb, depth, K, ob_in_cams,
               xyz_map, normal_map=None,
               get_vis=False, mesh=None, mesh_tensors=None,
