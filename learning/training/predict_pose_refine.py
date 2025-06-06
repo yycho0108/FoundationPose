@@ -21,9 +21,11 @@ from learning.models.refine_network import RefineNet
 from learning.datasets.h5_dataset import *
 from Utils import *
 from datareader import *
-from pkm.util.torch_util import dcn
-from pkm.util.img_util import _hwc
-from pkm.util.path import ensure_directory
+
+from pkm.util.torch_util import dcn, _hwc
+# from pkm.util.img_util import _hwc
+# from pkm.util.path import ensure_directory
+
 import cv2
 def digitize_image(x: np.ndarray, num_bins: int = 255,
                    aux: Optional[Dict[str, np.ndarray]] = None):

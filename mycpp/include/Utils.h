@@ -21,7 +21,7 @@
 #include <climits>
 #include <tuple>
 #include <unordered_map>
-#include <boost/assign.hpp>
+// #include <boost/assign.hpp>
 #include <thread>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -30,7 +30,7 @@
 #include <unistd.h>
 #include <memory>
 #include <math.h>
-#include <boost/format.hpp>
+// #include <boost/format.hpp>
 #include <numeric>
 #include <thread>
 #include <omp.h>
