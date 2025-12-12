@@ -7,16 +7,51 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 
-from Utils import *
-from Utils import erode_depth
-from datareader import *
-import itertools
-from learning.training.predict_score import *
-from learning.training.predict_pose_refine import *
-import yaml
 
-from pkm.util.torch_util import dcn
+import itertools
+import yaml
+import uuid
+import logging
 from pathlib import Path
+from transformations import  euler_matrix
+import imageio
+import copy
+
+import numpy as np
+import torch
+import torch as th
+import torch.nn as nn
+import torch.nn.functional as F
+import nvdiffrast.torch as dr
+import open3d as o3d
+import cv2
+
+# from Utils import *
+# from Utils import erode_depth
+# from datareader import *
+#from learning.training.predict_score import *
+#from learning.training.predict_pose_refine import *
+from learning.training.predict_score import ScorePredictor
+from learning.training.predict_pose_refine import PoseRefinePredictor
+from Utils import (
+        compute_mesh_diameter,
+        toOpen3dCloud,
+        uuid,
+        make_mesh_tensors,
+        sample_views_icosphere,
+        mycpp,
+        set_seed,
+        erode_depth,
+        bilateral_filter_depth,
+        depth2xyzmap,
+        depth2xyzmap_batch,
+        matrix_to_pos_rotation_matrix,
+        matrix_to_quaternion,
+        quaternion_to_matrix,
+        normalize_quaternion_torch,
+        batch_pos_rot_matrix_to_matrix,
+        dcn
+        )
 
 
 class FoundationPose:
@@ -90,8 +125,12 @@ class FoundationPose:
         pcd = toOpen3dCloud(model_pts,
                             normals=model_normals)
         pcd = pcd.voxel_down_sample(self.vox_size)
-        self.max_xyz = np.asarray(pcd.points).max(axis=0)
-        self.min_xyz = np.asarray(pcd.points).min(axis=0)
+        self.max_xyz = th.as_tensor(np.asarray(pcd.points).max(axis=0),
+                                    dtype=th.float32,
+                                    device='cuda')
+        self.min_xyz = th.as_tensor(np.asarray(pcd.points).min(axis=0),
+                                    dtype=th.float32,
+                                    device='cuda')
         self.pts = torch.tensor(np.asarray(pcd.points), dtype=torch.float32, device='cuda')
         self.normals = F.normalize(torch.tensor(np.asarray(pcd.normals),
                                                 dtype=torch.float32, device='cuda'), dim=-1)
@@ -171,22 +210,31 @@ class FoundationPose:
 
 
   def guess_translation(self, depth, mask, K):
-    depth = dcn(depth)
-    mask = dcn(mask)
-    K = dcn(K)
-    vs,us = np.where(mask>0)
+    # depth = dcn(depth)
+    # mask = dcn(mask)
+    # K = dcn(K)
+    # np.where(mask>0)
+    vs, us = th.where(mask > 0)
     if len(us)==0:
       logging.info(f'mask is all zero')
-      return np.zeros((3))
+      return th.zeros((3,),
+                      dtype=depth.dtype,
+                      device=depth.device)
     uc = (us.min()+us.max())/2.0
     vc = (vs.min()+vs.max())/2.0
-    valid = mask.astype(bool) & (depth>=0.1)
+    valid = th.logical_and(mask.to(bool),
+                           (depth>=0.1))
     if not valid.any():
       logging.info(f"valid is empty")
-      return np.zeros((3))
+      return th.zeros((3,),
+                      dtype=depth.dtype,
+                      device=depth.device)
 
-    zc = np.median(depth[valid])
-    center = (np.linalg.inv(K)@np.asarray([uc,vc,1]).reshape(3,1))*zc
+    zc = th.median(depth[valid])
+    center_cam = th.as_tensor([uc,vc,1],
+                              dtype=depth.dtype,
+                              device=depth.device).reshape(3,1)
+    center = (th.linalg.inv(K)@center_cam)*zc
 
     if self.debug>=2:
       pcd = toOpen3dCloud(center.reshape(1,3))
@@ -195,7 +243,8 @@ class FoundationPose:
     return center.reshape(3)
 
 
-  def register(self, K, rgb, depth, ob_mask, ob_id=None, glctx=None, iteration=5):
+  def register(self, K, rgb, depth, ob_mask, ob_id=None, glctx=None, iteration=5,
+               P=None):
     '''Copmute pose from given pts to self.pcd
     @pts: (N,3) np array, downsampled scene points
     '''
@@ -209,27 +258,34 @@ class FoundationPose:
       else:
         self.glctx = glctx
 
+    depth = torch.as_tensor(depth, device='cuda', dtype=torch.float)
     depth = erode_depth(depth, radius=2, device='cuda')
     depth = bilateral_filter_depth(depth, radius=2, device='cuda')
+
+    K = torch.as_tensor(K, device='cuda', dtype=torch.float)
 
     if self.debug>=2:
       xyz_map = depth2xyzmap(depth, K)
       valid = xyz_map[...,2]>=0.1
-      pcd = toOpen3dCloud(xyz_map[valid], rgb[valid])
-      o3d.io.write_point_cloud(f'{self.debug_dir}/scene_raw.ply',pcd)
+      pcd = toOpen3dCloud(dcn(xyz_map[valid]),
+                          dcn(rgb[valid]))
+      o3d.io.write_point_cloud(f'{self.debug_dir}/scene_raw.ply', pcd)
       cv2.imwrite(f'{self.debug_dir}/ob_mask.png', (ob_mask*255.0).clip(0,255))
+
+    ob_mask =torch.as_tensor(ob_mask, device='cuda', dtype=torch.float)
 
     normal_map = None
     valid = (depth>=0.1) & (ob_mask>0)
     if valid.sum()<4:
       logging.info(f'valid too small, return')
-      pose = np.eye(4)
+      pose = th.eye(4, dtype=depth.dtype,
+                    device=depth.device)
       pose[:3,3] = self.guess_translation(depth=depth, mask=ob_mask, K=K)
       return pose
 
     if self.debug>=2:
       imageio.imwrite(f'{self.debug_dir}/color.png', rgb)
-      cv2.imwrite(f'{self.debug_dir}/depth.png', (depth*1000).astype(np.uint16))
+      cv2.imwrite(f'{self.debug_dir}/depth.png', (dcn(depth)*1000).astype(np.uint16))
       valid = xyz_map[...,2]>=0.1
       pcd = toOpen3dCloud(xyz_map[valid], rgb[valid])
       o3d.io.write_point_cloud(f'{self.debug_dir}/scene_complete.ply',pcd)
@@ -255,7 +311,8 @@ class FoundationPose:
     else:
         xyz_map = depth2xyzmap_batch(depth[None], K[None],
                                      zfar=float('inf'))[0]
-    poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2)
+    poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=normal_map, xyz_map=xyz_map, glctx=self.glctx, mesh_diameter=self.diameter, iteration=iteration, get_vis=self.debug>=2,
+                                      P=P)
     if vis is not None:
       imageio.imwrite(f'{self.debug_dir}/vis_refiner.png', vis)
 
@@ -294,7 +351,8 @@ class FoundationPose:
 
 
   def track_one(self, rgb, depth, K, iteration, extra={},
-                pose_last = None):
+                pose_last = None,
+                P=None):
     if pose_last is None:
         pose_last = self.pose_last
 
@@ -315,7 +373,8 @@ class FoundationPose:
     pose, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth,
                                      K=K, ob_in_cams=pose_last.reshape(1,4,4),#.data.cpu().numpy(),
                                      normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter,
-                                     glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2)
+                                     glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2,
+                                     P=P)
     logging.info("pose done")
     if self.debug>=2:
       extra['vis'] = vis
@@ -327,7 +386,8 @@ class FoundationPose:
     return (pose@dpose).reshape(4,4)#.data.cpu().numpy().reshape(4,4)
 
 
-  def track_one_among_noises(self, rgb, mask, depth, K, iteration, pose_last, sample_guess_translation, sample_num, current_pos_noise=0.01, current_rot_noise=0.3, extra={}):
+  def track_one_among_noises(self, rgb, mask, depth, K, iteration, pose_last, sample_guess_translation, sample_num, current_pos_noise=0.01, current_rot_noise=0.3, extra={},
+                             P=None):
     sampled_poses = self.sample_added_noise(pose_last, 
                                             mask=mask,
                                             depth=depth,
@@ -347,7 +407,8 @@ class FoundationPose:
 
     poses, vis = self.refiner.predict(mesh=self.mesh, mesh_tensors=self.mesh_tensors, rgb=rgb, depth=depth, K=K, ob_in_cams=sampled_poses.reshape(-1,4,4),
                                       #.data.cpu().numpy(),
-                                      normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter, glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2)
+                                      normal_map=None, xyz_map=xyz_map, mesh_diameter=self.diameter, glctx=self.glctx, iteration=iteration, get_vis=self.debug>=2,
+                                      P=P)
     logging.info("pose done")
     scores, vis = self.scorer.predict(mesh=self.mesh, rgb=rgb, depth=depth, K=K, ob_in_cams=poses.data.cpu().numpy(), normal_map=None, mesh_tensors=self.mesh_tensors, glctx=self.glctx, mesh_diameter=self.diameter, get_vis=self.debug>=2)
     logging.info("score: ", str(scores))

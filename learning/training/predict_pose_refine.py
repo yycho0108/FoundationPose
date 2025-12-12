@@ -16,15 +16,16 @@ sys.path.append(f'{code_dir}/../../')
 import numpy as np
 import torch
 import torch as th
+import cv2
 from omegaconf import OmegaConf
+
 from learning.models.refine_network import RefineNet
 from learning.datasets.h5_dataset import *
 from Utils import *
 from datareader import *
-from pkm.util.torch_util import dcn
-from pkm.util.img_util import _hwc
-from pkm.util.path import ensure_directory
-import cv2
+
+
+
 def digitize_image(x: np.ndarray, num_bins: int = 255,
                    aux: Optional[Dict[str, np.ndarray]] = None):
     """ slow, to only use for visualization . """
@@ -46,6 +47,7 @@ def crop_img(img:th.Tensor,
             method=method,
             mesh_diameter=mesh_diameter
     )
+    print('<pre-crop>')
     crop = kornia.geometry.transform.warp_perspective(
             (torch.as_tensor(xyz_map, device='cuda', dtype=torch.float)
             .permute(2,0,1)[None].expand(B,-1,-1,-1)
@@ -72,7 +74,10 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
                          xyz_map, normal_map=None, mesh_diameter=None,
                          cfg=None, glctx=None, mesh_tensors=None,
                          dataset:PoseRefinePairH5Dataset=None,
-                         bbox2d_crop = None
+                         bbox2d_crop = None,
+                         projection_mat = None,
+                         light_dir = None,
+                         glcam_in_cvcam = None
                          ):
   logging.info("Welcome make_crop_data_batch")
   H,W = depth.shape[:2]
@@ -95,7 +100,8 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
   normal_rs = []
   xyz_map_rs = []
 
-  bbox2d_ori = transform_pts(bbox2d_crop, tf_to_crops.inverse()).reshape(-1,4)
+  bbox2d_ori = transform_pts(bbox2d_crop,
+                             th.linalg.inv_ex(tf_to_crops)[0]).reshape(-1,4)
 
   for b in range(0,len(poseA),bs):
     extra = {}
@@ -103,7 +109,12 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
                                                  context='cuda', get_normal=cfg['use_normal'],
                                                  glctx=glctx, mesh_tensors=mesh_tensors,
                                                  output_size=cfg['input_resize'],
-                                                 bbox2d=bbox2d_ori[b:b+bs], use_light=True, extra=extra)
+                                                 bbox2d=bbox2d_ori[b:b+bs],
+                                                 use_light=True,
+                                                 light_dir=light_dir,
+                                                 extra=extra,
+                                                 projection_mat = projection_mat,
+                                                 glcam_in_cvcam = glcam_in_cvcam)
     rgb_rs.append(rgb_r)
     depth_rs.append(depth_r[...,None])
     normal_rs.append(normal_r)
@@ -117,6 +128,7 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
 
   logging.info("render done")
 
+  # print('<pre-warp-rgbbs>')
   rgbBs = kornia.geometry.transform.warp_perspective((
       torch.as_tensor(rgb, dtype=torch.float, device='cuda')
           .permute(2,0,1)[None]
@@ -126,16 +138,22 @@ def make_crop_data_batch(render_size, ob_in_cams, mesh,
                                                      dsize=render_size,
                                                      mode='bilinear',
                                                      align_corners=False)
+  # print('<pre-warp-rgbas>')
   if rgb_rs.shape[-2:]!=cfg['input_resize']:
     rgbAs = kornia.geometry.transform.warp_perspective(rgb_rs, tf_to_crops, dsize=render_size, mode='bilinear', align_corners=False)
   else:
     rgbAs = rgb_rs
+
+  # print('<pre-warp-xyzas>')
   if xyz_map_rs.shape[-2:]!=cfg['input_resize']:
     xyz_mapAs = kornia.geometry.transform.warp_perspective(xyz_map_rs, tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
   else:
     xyz_mapAs = xyz_map_rs
+
+  # print('<pre-warp-xyzbs>')
   xyz_mapBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(xyz_map, device='cuda', dtype=torch.float).permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)  #(B,3,H,W)
 
+  # print('<pre-warp-normal>')
   if cfg['use_normal']:
     normalAs = kornia.geometry.transform.warp_perspective(normal_rs, tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
     normalBs = kornia.geometry.transform.warp_perspective(torch.as_tensor(normal_map, dtype=torch.float, device='cuda').permute(2,0,1)[None].expand(B,-1,-1,-1), tf_to_crops, dsize=render_size, mode='nearest', align_corners=False)
@@ -224,12 +242,34 @@ class PoseRefinePredictor:
                                        device='cuda',
                                        dtype=torch.float)
 
+    trans_normalizer = self.cfg['trans_normalizer']
+    if not isinstance(trans_normalizer, float):
+      trans_normalizer = torch.as_tensor(list(trans_normalizer),
+                                         device='cuda',
+                                         dtype=torch.float).reshape(1,3)
+    self.trans_normalizer = trans_normalizer
+    self.light_dir = torch.as_tensor(
+            np.array([0,0,1]),
+            dtype=th.float,
+            device='cuda')
+
+    self.glcam_in_cvcam = torch.as_tensor(np.array([[1,0,0,0],
+                              [0,-1,0,0],
+                              [0,0,-1,0],
+                              [0,0,0,1]]).astype(float),
+                                          dtype=th.float,
+                                          device='cuda')
+
   @torch.inference_mode()
   # @torch.no_grad()
   def predict(self, rgb, depth, K, ob_in_cams,
               xyz_map, normal_map=None,
               get_vis=False, mesh=None, mesh_tensors=None,
-              glctx=None, mesh_diameter=None, iteration:int=5):
+              glctx=None,
+              mesh_diameter=None,
+              iteration:int=5,
+              P:Optional[th.Tensor] = None
+              ):
     '''
     @rgb: np array (H,W,3)
     @ob_in_cams: np array (N,4,4)
@@ -256,9 +296,7 @@ class PoseRefinePredictor:
     rgb_tensor = torch.as_tensor(rgb, device='cuda', dtype=torch.float)
     depth_tensor = torch.as_tensor(depth, device='cuda', dtype=torch.float)
     xyz_map_tensor = torch.as_tensor(xyz_map, device='cuda', dtype=torch.float)
-    trans_normalizer = self.cfg['trans_normalizer']
-    if not isinstance(trans_normalizer, float):
-      trans_normalizer = torch.as_tensor(list(trans_normalizer), device='cuda', dtype=torch.float).reshape(1,3)
+    trans_normalizer = self.trans_normalizer
 
     for _ in range(iteration):
       logging.info("making cropped data")
@@ -268,7 +306,10 @@ class PoseRefinePredictor:
                                        xyz_map=xyz_map_tensor, cfg=self.cfg, glctx=glctx,
                                        mesh_tensors=mesh_tensors, dataset=self.dataset,
                                        mesh_diameter=mesh_diameter,
-                                       bbox2d_crop = self.bbox2d_crop)
+                                       bbox2d_crop = self.bbox2d_crop,
+                                       projection_mat=P,
+                                       light_dir = self.light_dir,
+                                       glcam_in_cvcam=self.glcam_in_cvcam)
       B_in_cams = []
       for b in range(0, pose_data.rgbAs.shape[0], bs):
         A = torch.cat([pose_data.rgbAs[b:b+bs].cuda(),
@@ -381,7 +422,10 @@ class PoseRefinePredictor:
                                        cfg=self.cfg, glctx=glctx,
                                        mesh_tensors=mesh_tensors, dataset=self.dataset,
                                        mesh_diameter=mesh_diameter,
-                                       bbox2d_crop=self.bbox2d_crop)
+                                       bbox2d_crop=self.bbox2d_crop,
+                                       projection_mat=P,
+                                       light_dir = self.light_dir,
+                                       glcam_in_cvcam=self.glcam_in_cvcam)
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()
         rgbB_vis = (pose_data.rgbBs[id]*255).permute(1,2,0).data.cpu().numpy()
@@ -408,7 +452,10 @@ class PoseRefinePredictor:
       pose_data = make_crop_data_batch(self.cfg.input_resize,
                                        B_in_cams, mesh_centered, rgb, depth, K, crop_ratio=crop_ratio, normal_map=normal_map, xyz_map=xyz_map_tensor, cfg=self.cfg,
                                        glctx=glctx, mesh_tensors=mesh_tensors, dataset=self.dataset, mesh_diameter=mesh_diameter,
-                                       bbox2d_crop=self.bbox2d_crop)
+                                       bbox2d_crop=self.bbox2d_crop,
+                                       projection_mat=P,
+                                       light_dir = self.light_dir,
+                                       glcam_in_cvcam=self.glcam_in_cvcam)
       canvas_refined = []
       for id in range(0, len(B_in_cams)):
         rgbA_vis = (pose_data.rgbAs[id]*255).permute(1,2,0).data.cpu().numpy()

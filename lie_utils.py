@@ -33,10 +33,19 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
+from typing import Optional
 
 import torch
 from torch import cos, sin
-from pkm.util.math_util import skew_matrix
+# from pkm.util.math_util import skew_matrix
+
+def skew_matrix(v: torch.Tensor, z: Optional[torch.Tensor] = None) -> torch.Tensor:
+    v0, v1, v2 = v[..., 0], v[..., 1], v[..., 2]
+    if z is None:
+        z = torch.zeros_like(v)
+    return torch.stack([z, -v2, v1,
+                     v2, z, -v0,
+                     -v1, v0, z], axis=-1).reshape(*v.shape[:-1], 3, 3)
 
 
 def get_small_and_large_angle_inds(theta: torch.Tensor, eps: float = 1e-3):
@@ -681,7 +690,7 @@ class SE3:
 
     @staticmethod
     # @torch.jit.script
-    @torch.compile
+    # @torch.compile
     def Exp(x:torch.Tensor)->torch.Tensor:
         x_ = x.view(-1, 6)
         w, v = x_[:, 0:3], x_[:, 3:6]
@@ -782,7 +791,7 @@ class SE3Exp_Function(torch.autograd.Function):
         return y
 
     @staticmethod
-    @torch.compile
+    # @torch.compile
     def backward(ctx, grad_output):
         (x, y, g) = ctx.saved_tensors
         # oe_expr = ctx.save_for_misc

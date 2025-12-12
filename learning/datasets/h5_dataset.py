@@ -81,7 +81,9 @@ class PairH5Dataset(torch.utils.data.Dataset):
     H,W = batch.rgbAs.shape[-2:]
     mesh_radius = batch.mesh_diameters.cuda()/2
     tf_to_crops = batch.tf_to_crops.cuda()
-    crop_to_oris = batch.tf_to_crops.inverse().cuda()  #(B,3,3)
+    # print(tf_to_crops)
+    #crop_to_oris = batch.tf_to_crops.inverse().cuda()  #(B,3,3)
+    crop_to_oris = torch.linalg.inv_ex(batch.tf_to_crops)[0].cuda()  #(B,3,3)
     batch.poseA = batch.poseA.cuda()
     batch.Ks = batch.Ks.cuda()
 

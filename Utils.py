@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 
+from typing import Union
 import os, sys, time,torch,pickle,trimesh,itertools,pdb,zipfile,datetime,imageio,gzip,logging,joblib,importlib,uuid,signal,multiprocessing,psutil,subprocess,tarfile,scipy,argparse
 from pytorch3d.transforms import so3_log_map,so3_exp_map,se3_exp_map,se3_log_map,matrix_to_axis_angle,matrix_to_euler_angles,euler_angles_to_matrix, rotation_6d_to_matrix
 from pytorch3d.renderer import FoVPerspectiveCameras, PerspectiveCameras, look_at_view_transform, look_at_rotation, RasterizationSettings, MeshRenderer, MeshRasterizer, BlendParams, SoftSilhouetteShader, HardPhongShader, PointLights, TexturesVertex
@@ -31,10 +32,11 @@ from collections import defaultdict
 import multiprocessing as mp
 import matplotlib.pyplot as plt
 import math,glob,re,copy
-from transformations import *
+from transformations import  euler_matrix
 from scipy.spatial import cKDTree
 from collections import OrderedDict
 import ruamel.yaml
+from pathlib import Path
 yaml = ruamel.yaml.YAML()
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
@@ -66,7 +68,7 @@ to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 BAD_DEPTH = 99
 BAD_COLOR = 0
 
-glcam_in_cvcam = np.array([[1,0,0,0],
+_glcam_in_cvcam = np.array([[1,0,0,0],
                           [0,-1,0,0],
                           [0,0,-1,0],
                           [0,0,0,1]]).astype(float)
@@ -261,7 +263,25 @@ def make_mesh_tensors(mesh, device='cuda', max_tex_size=None):
   return mesh_tensors
 
 
-def nvdiffrast_render(K=None, H=None, W=None, ob_in_cams=None, glctx=None, context='cuda', get_normal=False, mesh_tensors=None, mesh=None, projection_mat=None, bbox2d=None, output_size=None, use_light=False, light_color=None, light_dir=np.array([0,0,1]), light_pos=np.array([0,0,0]), w_ambient=0.8, w_diffuse=0.5, extra={}):
+def nvdiffrast_render(K=None, H=None, W=None,
+                      ob_in_cams=None,
+                      glctx=None,
+                      context='cuda',
+                      get_normal=False,
+                      mesh_tensors=None,
+                      mesh=None,
+                      projection_mat=None,
+                      bbox2d=None,
+                      output_size=None,
+                      use_light=False,
+                      light_color=None,
+                      light_dir=np.array([0,0,1]),
+                      light_pos=np.array([0,0,0]),
+                      w_ambient=0.8,
+                      w_diffuse=0.5,
+                      extra={},
+                      glcam_in_cvcam = None
+                      ):
   '''Just plain rendering, not support any gradient
   @K: (3,3) np array
   @ob_in_cams: (N,4,4) torch tensor, openCV camera
@@ -287,10 +307,17 @@ def nvdiffrast_render(K=None, H=None, W=None, ob_in_cams=None, glctx=None, conte
   pos_idx = mesh_tensors['faces']
   has_tex = 'tex' in mesh_tensors
 
-  ob_in_glcams = torch.tensor(glcam_in_cvcam, device='cuda', dtype=torch.float)[None]@ob_in_cams
+  if glcam_in_cvcam is None:
+      glcam_in_cvcam = _glcam_in_cvcam
+
+  ob_in_glcams = torch.tensor(glcam_in_cvcam,
+                              device='cuda',
+                              dtype=torch.float)[None]@ob_in_cams
   if projection_mat is None:
     projection_mat = projection_matrix_from_intrinsics(K, height=H, width=W, znear=0.1, zfar=100)
-  projection_mat = torch.as_tensor(projection_mat.reshape(-1,4,4), device='cuda', dtype=torch.float)
+  projection_mat = torch.as_tensor(projection_mat.reshape(-1,4,4),
+                                   device='cuda',
+                                   dtype=torch.float)
   mtx = projection_mat@ob_in_glcams
 
   if output_size is None:
@@ -783,11 +810,9 @@ def compute_crop_window_tf_batch(pts=None, H=None, W=None,
     tfs = compute_tf_batch(left, right, top, bottom, out_size,
                            device=K.device)
     return tfs
-
   else:
     raise RuntimeError
-
-  return tf
+  return None
 
 
 
@@ -1214,3 +1239,30 @@ def make_yaml_dumpable(D):
         D[d][i] = make_yaml_dumpable(D[d][i])
       continue
   return dict(D)
+
+
+
+def dcn(x):
+    if isinstance(x, torch.Tensor):
+        return x.detach().cpu().numpy()
+    return x
+
+def _hwc(x: torch.Tensor) -> torch.Tensor:
+    return einops.rearrange(x, '... c h w -> ... h w c')
+
+def ensure_directory(path: Union[str, os.PathLike]) -> Path:
+    """Ensure that the directory structure exists."""
+    path = Path(path)
+    if path.is_dir():
+        return path
+
+    if path.exists():
+        raise ValueError(F'path {path} exists and is not a directory.')
+    path.mkdir(parents=True, exist_ok=True)
+
+    if not path.is_dir():
+        raise ValueError(F'Failed to create path {path}.')
+
+    return path
+
+
